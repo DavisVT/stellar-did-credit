@@ -484,6 +484,7 @@ impl IdentityOracle {
         store_credential_type(&env, &subject, &vc_hash, credential_type);
 
         anchors.push_back(record);
+        store_credential_type(&env, &subject, &vc_hash, credential_type);
         env.storage().persistent().set(&key, &anchors);
         env.storage()
             .persistent()
