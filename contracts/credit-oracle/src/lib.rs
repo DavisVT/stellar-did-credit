@@ -865,9 +865,13 @@ impl CreditOracle {
     ) -> Result<(), CreditOracleError> {
         ensure_not_paused(&env)?;
         require_admin(&env);
+        let previous: Option<Address> = env.storage().instance().get(&DataKey::IdentityOracleId);
         env.storage()
             .instance()
             .set(&DataKey::IdentityOracleId, &identity_oracle_id);
+        let prev = previous.unwrap_or_else(|| identity_oracle_id.clone());
+        env.events()
+            .publish((symbol_short!("OrclSet"),), (prev, identity_oracle_id));
         Ok(())
     }
 

@@ -795,7 +795,7 @@ impl IdentityOracle {
 #[allow(deprecated)]
 mod tests {
     use super::*;
-    use soroban_sdk::{symbol_short, testutils::Address as _, Env};
+    use soroban_sdk::{symbol_short, testutils::Address as _, testutils::Events, Env, TryIntoVal};
 
     #[test]
     fn test_deactivate_did_removes_did_and_revokes_vcs() {
