@@ -827,6 +827,35 @@ mod tests {
     }
 
     #[test]
+    fn test_deactivate_did_removes_did_and_revokes_vcs() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let issuer = Address::generate(&env);
+        client.register_issuer(&issuer);
+
+        let subject = Address::generate(&env);
+        let cid = String::from_str(&env, "ipfs://QmTestDID");
+        client.anchor_did(&subject, &cid);
+
+        let vc_hash = BytesN::from_array(&env, &[1u8; 32]);
+        client.anchor_vc(&issuer, &subject, &vc_hash);
+
+        assert!(client.is_verified(&subject));
+        assert!(client.get_did_document(&subject).is_some());
+
+        client.deactivate_did(&subject);
+
+        assert!(!client.is_verified(&subject));
+        assert!(client.get_did_document(&subject).is_none());
+    }
+
+    #[test]
     fn test_anchor_vc_by_trusted_issuer() {
         let env = Env::default();
         env.mock_all_auths();
