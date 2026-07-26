@@ -273,8 +273,13 @@ impl Governance {
     /// 2. The execution timelock has expired (`sequence > expiry_ledger + execution_delay_ledgers`).
     ///
     /// If `votes_for > votes_against` and the quorum is met, the proposed weights
-    /// are applied to the credit-oracle. Otherwise the proposal is marked executed
-    /// without changing the weights.
+    /// are queued in the credit-oracle via `propose_weights` (starting the timelock).
+    /// Otherwise the proposal is marked executed without changing the weights.
+    /// Can only be called after `expiry_ledger`.
+    ///
+    /// After calling this function, `apply_weights` must be called once the
+    /// credit-oracle's timelock expires (approximately 24 hours / 17,280 ledgers)
+    /// to finalize the weight change.
     pub fn execute(env: Env, proposal_id: u64) -> Result<(), GovernanceError> {
         let proposal_key = DataKey::Proposal(proposal_id);
         let mut proposal: GovernanceProposal = env
@@ -494,8 +499,8 @@ mod tests {
             l.sequence_number += jump;
         });
 
-        // Apply proposed weights in credit-oracle
-        credit_oracle_client.apply_weights();
+        // Apply weights after timelock
+        gov_client.apply_weights();
 
         // Verify credit oracle weights updated
         let active_weights = credit_oracle_client.get_scoring_weights();
@@ -627,7 +632,7 @@ mod tests {
 
         let events = env.events().all();
         let mut found_event = false;
-        
+
         for (contract_id, topics, data) in events.iter() {
             if contract_id == gov_id {
                 if topics.len() == 2 {

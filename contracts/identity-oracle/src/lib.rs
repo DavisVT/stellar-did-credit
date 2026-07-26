@@ -1115,6 +1115,41 @@ mod tests {
     }
 
     #[test]
+    fn test_get_did_document_returns_cid_after_anchor() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let subject = Address::generate(&env);
+        let cid = String::from_str(&env, "ipfs://QmTestDIDDocument");
+
+        // Before anchoring, get_did_document returns None
+        assert!(client.get_did_document(&subject).is_none());
+
+        // Anchor the DID
+        client.anchor_did(&subject, &cid);
+
+        // After anchoring, get_did_document returns the CID
+        let result = client.get_did_document(&subject);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), cid);
+    }
+
+    #[test]
+    fn test_get_did_document_returns_none_for_unknown_subject() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let subject = Address::generate(&env);
+
+        // Subject has never anchored a DID
+        assert!(client.get_did_document(&subject).is_none());
+    }
+
+    #[test]
     fn test_anchor_did_overwrite() {
         let env = Env::default();
         env.mock_all_auths();

@@ -410,64 +410,6 @@ impl CreditOracle {
         Ok(())
     }
 
-    /// Propose a new contract admin (two-step admin transfer).
-    pub fn propose_new_admin(env: Env, new_admin: Address) -> Result<(), CreditOracleError> {
-        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
-        stored_admin.require_auth();
-        env.storage().instance().set(&DataKey::PendingAdmin, &new_admin);
-        Ok(())
-    }
-
-    /// Accept a proposed admin role (two-step admin transfer).
-    pub fn accept_admin(env: Env, new_admin: Address) -> Result<(), CreditOracleError> {
-        let pending: Option<Address> = env.storage().instance().get(&DataKey::PendingAdmin);
-        match pending {
-            Some(p) => {
-                if p != new_admin {
-                    panic!("not authorized");
-                }
-            }
-            None => return Err(CreditOracleError::NoPendingAdmin),
-        }
-        new_admin.require_auth();
-        env.storage().instance().set(&DataKey::Admin, &new_admin);
-        env.storage().instance().remove(&DataKey::PendingAdmin);
-        Ok(())
-    }
-
-    /// Set the identity-oracle contract ID for cross-contract VC count lookup.
-    ///
-    /// Auth: admin only — verified via stored_admin.require_auth()
-    pub fn set_identity_oracle(env: Env, identity_oracle_id: Address) -> Result<(), CreditOracleError> {
-        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
-        stored_admin.require_auth();
-        env.storage().instance().set(&DataKey::IdentityOracleId, &identity_oracle_id);
-        
-        env.events().publish((soroban_sdk::symbol_short!("OrclSet"),), identity_oracle_id);
-        Ok(())
-    }
-
-    /// Update the compute cooldown ledgers
-    pub fn update_compute_cooldown(env: Env, ledgers: u32) -> Result<(), CreditOracleError> {
-        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
-        stored_admin.require_auth();
-        env.storage().instance().set(&DataKey::ComputeCooldownLedgers, &ledgers);
-        
-        env.events().publish(
-            (symbol_short!("CdSet"),),
-            (ledgers, stored_admin),
-        );
-        Ok(())
-    }
-
-    /// Get current compute cooldown in ledgers
-    pub fn get_compute_cooldown(env: Env) -> u32 {
-        env.storage()
-            .instance()
-            .get(&DataKey::ComputeCooldownLedgers)
-            .unwrap_or(1) // Default to 1 ledger as described in docs
-    }
-
     /// Upgrade the contract WASM in-place, preserving address and all stored state.
     pub fn upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) {
         let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
