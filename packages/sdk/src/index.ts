@@ -393,18 +393,50 @@ export class StellarDIDCreditSDK {
     throw new Error("Simulation returned unexpected response");
   }
 
-  // Stubs for remaining tests
-  async computeScore(_keypair: any, _subjectAddress: string): Promise<ScoreRecord> {
-    throw new Error("Not implemented");
-  }
-  async getVCCount(_subjectAddress: string): Promise<number> {
-    throw new Error("Not implemented");
-  }
-  async getDIDDocument(_subjectAddress: string): Promise<string | null> {
-    throw new Error("Not implemented");
-  }
-  async revokeVC(_issuerKeypair: any, _subjectAddress: string, _vcHash: Buffer): Promise<string> {
-    throw new Error("Not implemented");
+  /**
+   * Fetch the DID document CID anchored for a subject address from the identity-oracle.
+   *
+   * Uses a read-only simulation (no signing required) against the configured RPC endpoint.
+   *
+   * @param subjectAddress - Stellar G... address of the subject
+   * @returns The IPFS CID of the anchored DID document, or null if no DID is anchored
+   */
+  async getDIDDocument(subjectAddress: string): Promise<string | null> {
+    const server = new SorobanRpc.Server(this.config.rpcUrl);
+    const contract = new Contract(this.config.identityOracleId);
+    const sourceAccount = new Account(this.config.simAccount, "0");
+
+    const tx = new TransactionBuilder(sourceAccount, {
+      fee: this.config.baseFee || BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(
+        contract.call("get_did_document", new Address(subjectAddress).toScVal()),
+      )
+      .setTimeout(this.config.timeoutSeconds ?? 30)
+      .build();
+
+    const sim = await server.simulateTransaction(tx);
+
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      throw new Error(`Simulation failed: ${sim.error}`);
+    }
+
+    if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
+      throw new Error("Simulation returned unexpected response");
+    }
+
+    const resultScVal = sim.result?.retval;
+    if (!resultScVal) {
+      throw new Error("No return value in simulation result");
+    }
+
+    const native = scValToNative(resultScVal);
+    // Option<String> — null/undefined means no DID anchored
+    if (native === null || native === undefined) {
+      return null;
+    }
+    return native as string;
   }
 
   /**

@@ -127,9 +127,23 @@ describe("StellarDIDCreditSDK", () => {
     });
   });
 
-  describe.skip("getDIDDocument", () => {
+  describe("getDIDDocument", () => {
     it("returns null when no DID is anchored", async () => {
-      const expectedCid = "QmXYZ123abc...";
+      mockSimulateTransaction.mockResolvedValue({
+        result: {
+          retval: { value: null },
+        },
+      });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const result = await sdk.getDIDDocument(subjectAddress);
+
+      expect(result).toBeNull();
+      expect(mockLastContractCall?.method).toBe("get_did_document");
+    });
+
+    it("returns the CID when a DID is anchored", async () => {
+      const expectedCid = "ipfs://QmTestDID123";
       mockSimulateTransaction.mockResolvedValue({
         result: {
           retval: { value: expectedCid },
@@ -139,8 +153,21 @@ describe("StellarDIDCreditSDK", () => {
       const sdk = new StellarDIDCreditSDK(mockConfig);
       const result = await sdk.getDIDDocument(subjectAddress);
 
-      expect(result).toBeNull();
+      expect(result).toBe(expectedCid);
       expect(mockLastContractCall?.method).toBe("get_did_document");
+      expect(mockLastContractCall?.args).toHaveLength(1);
+    });
+
+    it("throws when simulation returns an error", async () => {
+      mockSimulateTransaction.mockResolvedValue({
+        error: "contract error",
+      });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+
+      await expect(sdk.getDIDDocument(subjectAddress)).rejects.toThrow(
+        "Simulation failed: contract error",
+      );
     });
   });
 
