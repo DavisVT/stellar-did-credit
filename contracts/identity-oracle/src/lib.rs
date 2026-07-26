@@ -332,9 +332,42 @@ impl IdentityOracle {
             .instance()
             .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
 
+        // Mark the issuer as not trusted (tombstone). We will rebuild the
+        // compact `IssuersIndex` in-memory and write it once so that the
+        // rewrite is atomic from the perspective of contract storage: either
+        // the function completes and both the tombstone + new index are
+        // written, or the call aborts and nothing is changed.
         env.storage()
             .persistent()
             .set(&DataKey::TrustedIssuer(issuer.clone()), &false);
+
+        // Read the append-only index and construct a compacted vector of
+        // currently-trusted issuers. Do all work in-memory and perform a
+        // single `set` at the end so partial progress is never persisted.
+        let ever_registered: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::IssuersIndex)
+            .unwrap_or(Vec::new(&env));
+
+        let mut compacted = Vec::new(&env);
+        for addr in ever_registered.iter() {
+            let is_trusted: bool = env
+                .storage()
+                .persistent()
+                .get(&DataKey::TrustedIssuer(addr.clone()))
+                .unwrap_or(false);
+            if is_trusted {
+                compacted.push_back(addr);
+            }
+        }
+
+        // Write the compacted index once. If this call fails (e.g. out of
+        // gas), the entire transaction will abort and the previous
+        // `TrustedIssuer` tombstone write will be rolled back too.
+        env.storage()
+            .persistent()
+            .set(&DataKey::IssuersIndex, &compacted);
 
         env.events().publish((symbol_short!("IssDeReg"),), issuer);
         Ok(())
@@ -419,7 +452,7 @@ impl IdentityOracle {
             .get(&key)
             .unwrap_or(Vec::new(&env));
 
-        if anchors.len() > 0 {
+        if !anchors.is_empty() {
             let mut updated = Vec::new(&env);
             for mut record in anchors.iter() {
                 record.revoked = true;
@@ -803,7 +836,7 @@ impl IdentityOracle {
 #[allow(deprecated)]
 mod tests {
     use super::*;
-    use soroban_sdk::{symbol_short, testutils::Address as _, testutils::Events, Env, TryIntoVal};
+    use soroban_sdk::{testutils::Address as _, Env};
 
     #[test]
     fn test_deactivate_did_removes_did_and_revokes_vcs() {
@@ -833,6 +866,7 @@ mod tests {
         assert!(!client.is_verified(&subject));
         assert!(client.get_did_document(&subject).is_none());
     }
+
 
     #[test]
     fn test_anchor_vc_by_trusted_issuer() {
@@ -1406,5 +1440,20 @@ mod tests {
         env.mock_auths(&[]);
         let res = client.try_maintain_storage();
         assert!(res.is_err());
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, 1)")]
+    fn test_initialize_already_initialized() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let admin2 = Address::generate(&env);
+        client.initialize(&admin2);
     }
 }
