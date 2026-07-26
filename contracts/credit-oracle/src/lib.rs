@@ -43,6 +43,8 @@ pub enum DataKey {
     PendingWeights,
     /// Ledger number when pending weights become effective
     PendingWeightsEffectiveLedger,
+    /// Pending admin for two-step admin transfer
+    PendingAdmin,
 }
 
 /// Credit score record with metadata
@@ -332,7 +334,45 @@ impl CreditOracle {
 
     /// Get pending weights (if any)
     pub fn get_pending_weights(env: Env) -> Option<PendingWeightsRecord> {
-        env.storage().instance().get(&DataKey::PendingWeights)
+        let weights: Option<ScoringWeights> = env.storage().instance().get(&DataKey::PendingWeights);
+        weights.map(|w| {
+            let effective_ledger: u32 = env.storage()
+                .instance()
+                .get(&DataKey::PendingWeightsEffectiveLedger)
+                .expect("effective ledger should exist if weights exist");
+            PendingWeightsRecord {
+                weights: w,
+                effective_ledger,
+            }
+        })
+    }
+
+    /// Propose a new admin for the contract (first step of two-step admin transfer).
+    /// The proposed admin must call `accept_admin` to complete the transfer.
+    pub fn propose_new_admin(env: Env, new_admin: Address) -> Result<(), CreditOracleError> {
+        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
+        stored_admin.require_auth();
+        env.storage().instance().set(&DataKey::PendingAdmin, &new_admin);
+        env.events().publish((symbol_short!("AdmProp"),), new_admin);
+        Ok(())
+    }
+
+    /// Accept the admin role (second step of two-step admin transfer).
+    /// Must be called by the address that was proposed via `propose_new_admin`.
+    pub fn accept_admin(env: Env, new_admin: Address) -> Result<(), CreditOracleError> {
+        new_admin.require_auth();
+        let pending_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingAdmin)
+            .expect("no pending admin");
+        if new_admin != pending_admin {
+            return Err(CreditOracleError::NotAuthorized);
+        }
+        env.storage().instance().set(&DataKey::Admin, &new_admin);
+        env.storage().instance().remove(&DataKey::PendingAdmin);
+        env.events().publish((symbol_short!("AdmAccept"),), new_admin);
+        Ok(())
     }
 
     /// Upgrade the contract WASM in-place, preserving address and all stored state.
