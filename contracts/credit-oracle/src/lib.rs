@@ -1,5 +1,5 @@
 #![no_std]
-use soroban_sdk::{contract, contractimpl, contracttype, contracterror, symbol_short, Address, BytesN, Env};
+use soroban_sdk::{contract, contractimpl, contracttype, contracterror, symbol_short, Address, BytesN, Env, IntoVal};
 
 pub const MIN_SCORE: u32 = 300;
 pub const MAX_SCORE: u32 = 850;
@@ -18,6 +18,8 @@ pub enum CreditOracleError {
     LenderNotRegistered = 4,
     /// Proposed weights do not sum to 100.
     InvalidWeights = 5,
+    /// No pending admin proposal exists.
+    NoPendingAdmin = 6,
 }
 
 /// Storage keys for the credit oracle contract
@@ -25,6 +27,8 @@ pub enum CreditOracleError {
 pub enum DataKey {
     /// Contract administrator address
     Admin,
+    /// Pending contract admin address for two-step transfer
+    PendingAdmin,
     /// Global configuration
     Config,
     /// Trusted feeder address authorized to update transaction stats
@@ -43,10 +47,10 @@ pub enum DataKey {
     PendingWeights,
     /// Ledger number when pending weights become effective
     PendingWeightsEffectiveLedger,
-    /// Pending admin for two-step admin transfer
-    PendingAdmin,
-    /// Identity oracle contract ID for cross-contract VC count lookups
+    /// Identity oracle contract ID for cross-contract lookups
     IdentityOracleId,
+    /// Number of ledgers to wait before recomputing score
+    ComputeCooldownLedgers,
 }
 
 /// Credit score record with metadata
@@ -63,6 +67,8 @@ pub struct ScoreRecord {
     pub repayment_rate: u32,
     /// Transaction volume in last 30 days
     pub tx_volume_30d: i128,
+    /// Previous credit score, if one exists
+    pub previous_score: Option<u32>,
 }
 
 /// Transaction statistics for a user
@@ -227,9 +233,18 @@ impl CreditOracle {
             .get(&DataKey::RepaymentRecord(subject.clone()))
             .unwrap_or(RepaymentRecord { on_time_count: 0, total_count: 0 });
 
-        let vc_count: u32 = env.storage().persistent()
+        let mut vc_count: u32 = env.storage().persistent()
             .get(&DataKey::VcCount(subject.clone()))
             .unwrap_or(0u32);
+
+        // Cross-contract lookup takes precedence if configured
+        if let Some(identity_oracle_id) = env.storage().instance().get::<_, Address>(&DataKey::IdentityOracleId) {
+            vc_count = env.invoke_contract::<u32>(
+                &identity_oracle_id,
+                &soroban_sdk::Symbol::new(&env, "get_active_vc_count"),
+                soroban_sdk::vec![&env, subject.clone().into_val(&env)],
+            );
+        }
 
         let vc_score = (vc_count * 20).min(100);
 
@@ -258,15 +273,33 @@ impl CreditOracle {
 
         let score = (MIN_SCORE + composite * 550 / 100).clamp(MIN_SCORE, MAX_SCORE);
 
-        env.storage().persistent().set(&DataKey::Score(subject.clone()), &ScoreRecord {
-            score,
-            last_updated: env.ledger().timestamp(),
-            vc_count,
-            repayment_rate: (repayment.on_time_count * 10000)
+        let repayment_rate = (repayment.on_time_count * 10000)
                                 .checked_div(repayment.total_count)
-                                .unwrap_or(0),
-            tx_volume_30d: tx_stats.volume_30d,
-        });
+                                .unwrap_or(0);
+
+        let mut previous_score: Option<u32> = None;
+        let mut needs_write = true;
+        if let Some(prev) = env.storage().persistent().get::<_, ScoreRecord>(&DataKey::Score(subject.clone())) {
+            if prev.score == score 
+                && prev.vc_count == vc_count 
+                && prev.repayment_rate == repayment_rate 
+                && prev.tx_volume_30d == tx_stats.volume_30d 
+            {
+                needs_write = false;
+            }
+            previous_score = Some(prev.score);
+        }
+
+        if needs_write {
+            env.storage().persistent().set(&DataKey::Score(subject.clone()), &ScoreRecord {
+                score,
+                last_updated: env.ledger().timestamp(),
+                vc_count,
+                repayment_rate,
+                tx_volume_30d: tx_stats.volume_30d,
+                previous_score,
+            });
+        }
 
         score
     }
@@ -723,7 +756,6 @@ mod tests {
         let admin = Address::generate(&env);
         let feeder = Address::generate(&env);
         client.initialize(&admin);
-        client.register_feeder(&admin, &feeder);
 
         // Propose and apply weights with tx_weight = 0
         client.propose_weights(&ScoringWeights { vc_weight: 60, tx_weight: 0, repayment_weight: 40 });
@@ -733,6 +765,8 @@ mod tests {
         });
         env.ledger().set_sequence_number(env.ledger().sequence() + jump);
         client.apply_weights();
+
+        client.register_feeder(&admin, &feeder);
 
         let subject_with_counterparties = Address::generate(&env);
         let subject_without_counterparties = Address::generate(&env);
@@ -770,7 +804,6 @@ mod tests {
         let admin = Address::generate(&env);
         let feeder = Address::generate(&env);
         client.initialize(&admin);
-        client.register_feeder(&admin, &feeder);
 
         // Propose and apply weights with tx_weight = 100
         client.propose_weights(&ScoringWeights { vc_weight: 0, tx_weight: 100, repayment_weight: 0 });
@@ -780,6 +813,8 @@ mod tests {
         });
         env.ledger().set_sequence_number(env.ledger().sequence() + jump);
         client.apply_weights();
+
+        client.register_feeder(&admin, &feeder);
 
         let subject_with = Address::generate(&env);
         let subject_without = Address::generate(&env);
@@ -839,3 +874,88 @@ mod tests {
     }
 }
 
+    #[test]
+    fn test_admin_transfer_two_step() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin1 = Address::generate(&env);
+        let admin2 = Address::generate(&env);
+        let feeder = Address::generate(&env);
+
+        client.initialize(&admin1);
+
+        client.propose_new_admin(&admin2);
+        client.accept_admin(&admin2);
+
+        // new admin can register feeder
+        client.register_feeder(&admin2, &feeder);
+
+        // old admin cannot register feeder
+        let feeder2 = Address::generate(&env);
+        let res = client.try_register_feeder(&admin1, &feeder2);
+        assert_eq!(res, Err(Ok(CreditOracleError::NotAuthorized)));
+    }
+
+    #[test]
+    #[should_panic(expected = "not authorized")]
+    fn test_non_pending_admin_cannot_accept() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin1 = Address::generate(&env);
+        let admin2 = Address::generate(&env);
+        let non_admin = Address::generate(&env);
+
+        client.initialize(&admin1);
+        client.propose_new_admin(&admin2);
+
+        let _ = client.accept_admin(&non_admin);
+    }
+
+    #[test]
+    fn test_compute_score_skips_write_when_inputs_unchanged() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+
+        // First computation sets initial values
+        client.compute_score(&subject);
+        let record1 = client.get_score(&subject).unwrap();
+
+        // Advance ledger time by 100 seconds
+        env.ledger().set_timestamp(env.ledger().timestamp() + 100);
+
+        // Second computation with identical inputs
+        client.compute_score(&subject);
+        let record2 = client.get_score(&subject).unwrap();
+
+        // Timestamp shouldn't change because write was skipped
+        assert_eq!(record1.last_updated, record2.last_updated);
+
+        // Change an input (VC count)
+        let feeder = Address::generate(&env);
+        client.register_feeder(&admin, &feeder);
+        client.set_vc_count(&feeder, &subject, &2);
+
+        // Advance ledger time again
+        env.ledger().set_timestamp(env.ledger().timestamp() + 100);
+
+        // Third computation with changed input
+        client.compute_score(&subject);
+        let record3 = client.get_score(&subject).unwrap();
+
+        // Write occurred, so timestamp is updated
+        assert!(record3.last_updated > record2.last_updated);
+        assert_eq!(record3.vc_count, 2);
+    }
+}

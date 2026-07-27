@@ -21,6 +21,7 @@ export interface ScoreRecord {
   vcCount: number;
   repaymentRate: number;
   txVolume30d: bigint;
+  previousScore: number | null;
 }
 
 export interface TxStats {
@@ -280,9 +281,15 @@ export class StellarDIDCreditSDK {
    * Submits a signed transaction to the credit-oracle contract, waits for ledger
    * confirmation, then fetches the persisted score via `getScore`.
    *
+   * **Note on Cooldowns:** The `compute_score` contract method is protected by a 
+   * cooldown period (`ComputeCooldownLedgers`). If this method is called while the 
+   * cooldown is active (or immediately after a fresh deployment before the initial 
+   * cooldown has passed), the transaction will fail.
+   *
    * @param payerKeypair - Stellar keypair paying the transaction fee
    * @param subjectAddress - Stellar G... address of the subject
    * @returns Persisted ScoreRecord after the compute_score transaction is confirmed
+   * @throws Error if the transaction fails due to the cooldown period being active
    */
   async computeScore(
     payerKeypair: Keypair,
@@ -308,6 +315,9 @@ export class StellarDIDCreditSDK {
     const sim = await simulateWithRetry(this.server, tx, this.config.maxRetries ?? 3);
 
     if (SorobanRpc.Api.isSimulationError(sim)) {
+      if (sim.error && sim.error.toLowerCase().includes("cooldown")) {
+        throw new Error(`computeScore failed: Cooldown period is active. Please wait for the cooldown ledgers to pass before recomputing the score.`);
+      }
       throw new Error(`Simulation failed: ${sim.error}`);
     }
 
@@ -321,6 +331,9 @@ export class StellarDIDCreditSDK {
     const response = await this.server.sendTransaction(preparedTx);
 
     if (response.status !== "PENDING") {
+      if (response.errorResult && String(response.errorResult).toLowerCase().includes("cooldown")) {
+        throw new Error(`Transaction submission failed: Cooldown period is active. Please wait for the cooldown ledgers to pass before recomputing the score.`);
+      }
       throw new Error(`Transaction submission failed: ${String(response.errorResult)}`);
     }
 
@@ -393,18 +406,50 @@ export class StellarDIDCreditSDK {
     throw new Error("Simulation returned unexpected response");
   }
 
-  // Stubs for remaining tests
-  async computeScore(_keypair: any, _subjectAddress: string): Promise<ScoreRecord> {
-    throw new Error("Not implemented");
-  }
-  async getVCCount(_subjectAddress: string): Promise<number> {
-    throw new Error("Not implemented");
-  }
-  async getDIDDocument(_subjectAddress: string): Promise<string | null> {
-    throw new Error("Not implemented");
-  }
-  async revokeVC(_issuerKeypair: any, _subjectAddress: string, _vcHash: Buffer): Promise<string> {
-    throw new Error("Not implemented");
+  /**
+   * Fetch the DID document CID anchored for a subject address from the identity-oracle.
+   *
+   * Uses a read-only simulation (no signing required) against the configured RPC endpoint.
+   *
+   * @param subjectAddress - Stellar G... address of the subject
+   * @returns The IPFS CID of the anchored DID document, or null if no DID is anchored
+   */
+  async getDIDDocument(subjectAddress: string): Promise<string | null> {
+    const server = new SorobanRpc.Server(this.config.rpcUrl);
+    const contract = new Contract(this.config.identityOracleId);
+    const sourceAccount = new Account(this.config.simAccount, "0");
+
+    const tx = new TransactionBuilder(sourceAccount, {
+      fee: this.config.baseFee || BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(
+        contract.call("get_did_document", new Address(subjectAddress).toScVal()),
+      )
+      .setTimeout(this.config.timeoutSeconds ?? 30)
+      .build();
+
+    const sim = await server.simulateTransaction(tx);
+
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      throw new Error(`Simulation failed: ${sim.error}`);
+    }
+
+    if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
+      throw new Error("Simulation returned unexpected response");
+    }
+
+    const resultScVal = sim.result?.retval;
+    if (!resultScVal) {
+      throw new Error("No return value in simulation result");
+    }
+
+    const native = scValToNative(resultScVal);
+    // Option<String> — null/undefined means no DID anchored
+    if (native === null || native === undefined) {
+      return null;
+    }
+    return native as string;
   }
 
   /**
@@ -557,6 +602,10 @@ function parseScoreRecord(scVal: xdr.ScVal, subjectAddress: string): ScoreRecord
     vcCount: Number(raw["vc_count"]),
     repaymentRate: Number(raw["repayment_rate"]),
     txVolume30d: BigInt(raw["tx_volume_30d"] as bigint),
+    previousScore:
+      raw["previous_score"] != null
+        ? Number(raw["previous_score"])
+        : null,
   };
 }
 

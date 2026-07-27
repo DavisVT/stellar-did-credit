@@ -9,14 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `credit-oracle`: `set_identity_oracle(admin, identity_oracle_id)` — admin-gated function to configure cross-contract VC count lookups (#234)
-- `credit-oracle`: `get_identity_oracle()` — read-only getter that returns the configured identity-oracle contract ID, or `None` if not set (#234)
 - `identity-oracle`: `get_did_document(subject)` — read-only function that returns the anchored DID document CID for a subject, or `None` if no DID is anchored (#229)
 - TypeScript SDK (`@stellar-did-credit/sdk`): `getDIDDocument(subjectAddress)` — fetches the anchored DID document CID from identity-oracle, returning `null` if not set (#229)
-
-### Changed
-
-- `feeder`: skips `set_vc_count` when cross-contract VC count lookup is configured on the credit-oracle, avoiding a deprecated transaction and stale storage writes (#234)
 
 ### Added
 

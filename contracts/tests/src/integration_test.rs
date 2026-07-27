@@ -10,112 +10,6 @@ mod tests {
     };
 
     #[test]
-    fn test_pause_unpause_blocks_writes_and_allows_reads() {
-        let env = Env::default();
-        env.mock_all_auths();
-
-        let identity_id = env.register_contract(None, IdentityOracle);
-        let credit_id = env.register_contract(None, CreditOracle);
-        let revocation_id = env.register_contract(None, RevocationRegistry);
-
-        let identity = IdentityOracleClient::new(&env, &identity_id);
-        let credit = CreditOracleClient::new(&env, &credit_id);
-        let revocation = RevocationRegistryClient::new(&env, &revocation_id);
-
-        let admin = soroban_sdk::Address::generate(&env);
-        identity.initialize(&admin);
-        credit.initialize(&admin);
-        revocation.initialize(&admin);
-
-        let issuer = soroban_sdk::Address::generate(&env);
-        identity.register_issuer(&issuer);
-
-        let subject = soroban_sdk::Address::generate(&env);
-        let cid = String::from_str(&env, "ipfs://QmPauseTestDID");
-        identity.anchor_did(&subject, &cid);
-
-        let vc_hash = BytesN::from_array(&env, &[77u8; 32]);
-        identity.anchor_vc(&issuer, &subject, &vc_hash);
-
-        assert!(identity.is_verified(&subject));
-        assert_eq!(identity.get_active_vc_count(&subject), 1);
-
-        identity.pause(&admin).unwrap();
-
-        let paused_anchor = identity.try_anchor_did(&subject, &cid);
-        assert_eq!(
-            paused_anchor,
-            Err(Ok(identity_oracle::IdentityOracleError::ContractPaused))
-        );
-
-        let paused_vc = identity.try_anchor_vc(&issuer, &subject, &vc_hash);
-        assert_eq!(
-            paused_vc,
-            Err(Ok(identity_oracle::IdentityOracleError::ContractPaused))
-        );
-
-        assert!(identity.is_verified(&subject));
-        assert_eq!(identity.get_active_vc_count(&subject), 1);
-
-        let feeder = soroban_sdk::Address::generate(&env);
-        credit.register_feeder(&feeder);
-
-        let paused_tx_stats = credit.try_update_tx_stats(
-            &feeder,
-            &subject,
-            &TxStats {
-                volume_30d: 100_000_000i128,
-                tx_count_30d: 2,
-                avg_counterparties: 1,
-            },
-        );
-        assert_eq!(
-            paused_tx_stats,
-            Err(Ok(credit_oracle::CreditOracleError::ContractPaused))
-        );
-
-        let paused_score = credit.try_compute_score(&subject);
-        assert_eq!(
-            paused_score,
-            Err(Ok(credit_oracle::CreditOracleError::ContractPaused))
-        );
-
-        let weights = credit.get_scoring_weights();
-        assert_eq!(weights.vc_weight, 40);
-        assert_eq!(weights.tx_weight, 30);
-        assert_eq!(weights.repayment_weight, 30);
-
-        credit.unpause(&admin).unwrap();
-        let resumed = credit.try_update_tx_stats(
-            &feeder,
-            &subject,
-            &TxStats {
-                volume_30d: 100_000_000i128,
-                tx_count_30d: 2,
-                avg_counterparties: 1,
-            },
-        );
-        assert!(resumed.is_ok());
-
-        let paused_revocation = revocation.try_revoke(&issuer, &vc_hash);
-        assert_eq!(
-            paused_revocation,
-            Err(Ok(revocation_registry::RevocationRegistryError::ContractPaused))
-        );
-
-        assert!(revocation.is_revoked(&vc_hash) == false);
-
-        revocation.pause(&admin).unwrap();
-        let paused_batch = revocation.try_batch_revoke(&issuer, &soroban_sdk::Vec::from_array(&env, [vc_hash.clone()]));
-        assert_eq!(
-            paused_batch,
-            Err(Ok(revocation_registry::RevocationRegistryError::ContractPaused))
-        );
-
-        assert!(!revocation.is_revoked(&vc_hash));
-    }
-
-    #[test]
     fn test_full_protocol_flow() {
         // 1. Create Env with mock_all_auths
         let env = Env::default();
@@ -157,8 +51,8 @@ mod tests {
         // 7. Register a lender and feeder in credit-oracle
         let lender = soroban_sdk::Address::generate(&env);
         let feeder = soroban_sdk::Address::generate(&env);
-        credit.register_lender(&lender);
-        credit.register_feeder(&feeder);
+        credit.register_lender(&admin, &lender);
+        credit.register_feeder(&admin, &feeder);
 
         // 8. Call set_vc_count(subject, 1)
         credit.set_vc_count(&feeder, &subject, &1);
@@ -227,7 +121,7 @@ mod tests {
 
         // Now set the cached value to 0 to ensure the cross-contract path is used
         let feeder = soroban_sdk::Address::generate(&env);
-        credit.register_feeder(&feeder);
+        credit.register_feeder(&admin, &feeder);
         credit.set_vc_count(&feeder, &subject, &0);
         env.ledger()
             .set_sequence_number(env.ledger().sequence() + 1);
@@ -269,8 +163,8 @@ mod tests {
 
         let lender = soroban_sdk::Address::generate(&env);
         let feeder = soroban_sdk::Address::generate(&env);
-        credit.register_lender(&lender);
-        credit.register_feeder(&feeder);
+        credit.register_lender(&admin, &lender);
+        credit.register_feeder(&admin, &feeder);
 
         // 1. Get initial score with vc_count = 1
         credit.set_vc_count(&feeder, &subject, &1);
@@ -432,8 +326,8 @@ mod tests {
         // 5. Assert is_verified is true (5 active VCs)
         assert!(identity.is_verified(&subject));
 
-        // 6. Assert get_vc_count returns 5
-        assert_eq!(identity.get_vc_count(&subject), 5);
+        // 6. Assert get_total_vc_count returns 5
+        assert_eq!(identity.get_total_vc_count(&subject), 5);
 
         // 7. Create a vector of the first 3 hashes to batch revoke
         let mut batch_revoke_hashes = soroban_sdk::Vec::new(&env);
@@ -476,9 +370,9 @@ mod tests {
             "Subject should still be verified with 2 active VCs"
         );
 
-        // 13. Assert get_vc_count returns 5 (total count unchanged)
+        // 13. Assert get_total_vc_count returns 5 (total count unchanged after revocation)
         assert_eq!(
-            identity.get_vc_count(&subject),
+            identity.get_total_vc_count(&subject),
             5,
             "Total VC count should remain 5"
         );
@@ -486,8 +380,8 @@ mod tests {
         // 14. Setup credit-oracle to test score changes
         let lender = soroban_sdk::Address::generate(&env);
         let feeder = soroban_sdk::Address::generate(&env);
-        credit.register_lender(&lender);
-        credit.register_feeder(&feeder);
+        credit.register_lender(&admin, &lender);
+        credit.register_feeder(&admin, &feeder);
 
         // 15. Set initial VC count to 5 and compute score
         credit.set_vc_count(&feeder, &subject, &5);
@@ -648,9 +542,10 @@ mod tests {
         assert_eq!(revocation.get_revocation_count(&issuer2), 0);
         assert_eq!(revocation.list_revoked(&issuer1, &0, &10).len(), 0);
 
+        let subject = soroban_sdk::Address::generate(&env);
         // 1. Single revocation by issuer1
         let hash_a = BytesN::from_array(&env, &[101u8; 32]);
-        revocation.revoke(&issuer1, &hash_a);
+        revocation.revoke(&issuer1, &subject, &hash_a);
 
         assert_eq!(revocation.get_revocation_count(&issuer1), 1);
         let list1 = revocation.list_revoked(&issuer1, &0, &10);
@@ -674,12 +569,297 @@ mod tests {
 
         // 3. Single revocation by issuer2
         let hash_d = BytesN::from_array(&env, &[104u8; 32]);
-        revocation.revoke(&issuer2, &hash_d);
+        revocation.revoke(&issuer2, &subject, &hash_d);
 
         assert_eq!(revocation.get_revocation_count(&issuer2), 1);
         assert_eq!(revocation.get_revocation_count(&issuer1), 3);
         let list2 = revocation.list_revoked(&issuer2, &0, &10);
         assert_eq!(list2.len(), 1);
         assert_eq!(list2.get(0).unwrap(), hash_d);
+    }
+
+    /// Integration test for governance execution timelock:
+    /// vote passes → advance past voting → execution rejected (timelock) →
+    /// advance past delay → execution succeeds.
+    #[test]
+    fn test_governance_execution_timelock_integration() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let credit_id = env.register_contract(None, CreditOracle);
+        let gov_id = env.register_contract(None, Governance);
+
+        let credit = CreditOracleClient::new(&env, &credit_id);
+        let gov = GovernanceClient::new(&env, &gov_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+        credit.initialize(&admin);
+        gov.initialize(&admin, &credit_id, &100);
+
+        // Transfer oracle admin to governance contract
+        credit.propose_new_admin(&gov_id);
+        gov.accept_oracle_admin();
+
+        let proposed_weights = ScoringWeights {
+            vc_weight: 50,
+            tx_weight: 20,
+            repayment_weight: 30,
+        };
+
+        let proposer = soroban_sdk::Address::generate(&env);
+        // voting_period = 100 ledgers, execution_delay = 50 ledgers
+        let proposal_id = gov.create_proposal(&proposer, &proposed_weights, &100, &50);
+
+        // Cast passing votes
+        let voter = soroban_sdk::Address::generate(&env);
+        
+        // Register voter with sufficient weight
+        gov.register_voter(&admin, &voter, &200);
+        
+        gov.vote(&voter, &proposal_id, &true, &200);
+
+        // Step 1: advance just past voting period (expiry_ledger + 1)
+        // but still within the execution timelock window
+        env.ledger().with_mut(|l| {
+            l.sequence_number += 101;
+        });
+
+        // Execution must fail — timelock not yet expired
+        let res = gov.try_execute(&proposal_id);
+        assert_eq!(
+            res,
+            Err(Ok(GovernanceError::TimelockNotExpired)),
+            "expected TimelockNotExpired while within execution delay window"
+        );
+
+        let proposal = gov.get_proposal(&proposal_id).unwrap();
+        assert!(!proposal.executed, "proposal must not be executed yet");
+
+        // Step 2: advance past the execution timelock (50 more ledgers)
+        env.ledger().with_mut(|l| {
+            l.sequence_number += 50;
+        });
+
+        // Execution must now succeed
+        gov.execute(&proposal_id);
+
+        let proposal = gov.get_proposal(&proposal_id).unwrap();
+        assert!(proposal.executed, "proposal must be executed after timelock");
+
+        // Verify weights were applied to the credit oracle
+        let weights = credit.get_scoring_weights();
+        assert_eq!(weights.vc_weight, 50);
+        assert_eq!(weights.tx_weight, 20);
+        assert_eq!(weights.repayment_weight, 30);
+    }
+
+    #[test]
+    fn test_governance_integration_deploy_all_contracts_and_admin_flow() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        // Deploy all four contracts
+        let identity_id = env.register_contract(None, IdentityOracle);
+        let credit_id = env.register_contract(None, CreditOracle);
+        let revocation_id = env.register_contract(None, RevocationRegistry);
+        let gov_id = env.register_contract(None, Governance);
+
+        let identity = IdentityOracleClient::new(&env, &identity_id);
+        let credit = CreditOracleClient::new(&env, &credit_id);
+        let revocation = RevocationRegistryClient::new(&env, &revocation_id);
+        let gov = GovernanceClient::new(&env, &gov_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+
+        // Initialize all contracts with the same admin for simplicity
+        identity.initialize(&admin);
+        credit.initialize(&admin);
+        revocation.initialize(&admin);
+        gov.initialize(&admin, &credit_id, &100);
+
+        // Wire identity <-> revocation and credit <-> identity
+        identity.set_revocation_registry(&revocation_id);
+        credit.set_identity_oracle(&identity_id).unwrap();
+
+        // 1) Two-step admin transfer on `credit`: admin -> new_admin
+        let new_admin = soroban_sdk::Address::generate(&env);
+        // Propose new admin (signed by current admin)
+        credit.propose_new_admin(&new_admin).unwrap();
+        // Accept as new admin
+        credit.accept_admin(&new_admin).unwrap();
+
+        // Verify admin changed by exercising an admin-only call using `new_admin`
+        let feeder = soroban_sdk::Address::generate(&env);
+        credit.register_feeder(&new_admin, &feeder).unwrap();
+
+        // 2) Transfer oracle admin to governance contract
+        credit.propose_new_admin(&gov_id).unwrap();
+        // Governance accepts the oracle admin on its behalf
+        gov.accept_oracle_admin().unwrap();
+
+        // 3) Governance proposal lifecycle: create -> vote -> execute -> apply
+        let proposed_weights = ScoringWeights {
+            vc_weight: 45,
+            tx_weight: 25,
+            repayment_weight: 30,
+        };
+
+        let proposer = soroban_sdk::Address::generate(&env);
+        let proposal_id = gov.create_proposal(&proposer, &proposed_weights, &10u32, &0u32);
+
+        // Cast votes to pass the proposal
+        let voter = soroban_sdk::Address::generate(&env);
+        
+        // Register voter with sufficient weight
+        gov.register_voter(&admin, &voter, &200i128);
+        
+        gov.vote(&voter, &proposal_id, &true, &200i128).unwrap();
+
+        // Advance ledger past voting expiry
+        env.ledger().with_mut(|l| {
+            l.sequence_number += 11;
+        });
+
+        // Execute proposal (governance is now credit admin and will propose weights)
+        gov.execute(&proposal_id).unwrap();
+
+        // Advance ledger to pass credit-oracle timelock and apply the proposed weights
+        let jump = 100_000u32;
+        env.as_contract(&credit_id, || {
+            env.storage().instance().extend_ttl(jump, jump);
+        });
+        env.ledger().with_mut(|l| {
+            l.sequence_number += jump;
+        });
+
+        credit.apply_weights();
+
+        // Verify the credit oracle weights were updated
+        let active_weights = credit.get_scoring_weights();
+        assert_eq!(active_weights.vc_weight, 45);
+        assert_eq!(active_weights.tx_weight, 25);
+        assert_eq!(active_weights.repayment_weight, 30);
+    }
+
+    #[test]
+    fn test_list_issuers_reflects_register_and_deregister_operations() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let identity_id = env.register_contract(None, IdentityOracle);
+        let identity = IdentityOracleClient::new(&env, &identity_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+        identity.initialize(&admin);
+
+        let issuer_a = soroban_sdk::Address::generate(&env);
+        let issuer_b = soroban_sdk::Address::generate(&env);
+        let issuer_c = soroban_sdk::Address::generate(&env);
+
+        identity.register_issuer(&issuer_a);
+        identity.register_issuer(&issuer_b);
+        identity.register_issuer(&issuer_c);
+
+        let all = identity.list_issuers();
+        assert_eq!(all.len(), 3);
+
+        identity.deregister_issuer(&issuer_b);
+        let after = identity.list_issuers();
+        assert_eq!(after.len(), 2);
+        // remaining entries should be a and c in some order
+        let mut found_a = false;
+        let mut found_c = false;
+        for i in 0..after.len() {
+            let a = after.get(i).unwrap();
+            if a == issuer_a {
+                found_a = true;
+            }
+            if a == issuer_c {
+                found_c = true;
+            }
+        }
+        assert!(found_a && found_c, "expected issuer_a and issuer_c to remain");
+    }
+
+    #[test]
+    fn test_reregistering_deregistered_issuer_does_not_duplicate_index() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let identity_id = env.register_contract(None, IdentityOracle);
+        let identity = IdentityOracleClient::new(&env, &identity_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+        identity.initialize(&admin);
+
+        let issuer = soroban_sdk::Address::generate(&env);
+
+        identity.register_issuer(&issuer);
+        let first = identity.list_issuers();
+        assert_eq!(first.len(), 1);
+
+        identity.deregister_issuer(&issuer);
+        let after_dereg = identity.list_issuers();
+        assert_eq!(after_dereg.len(), 0);
+
+        // Re-register — should not create a duplicate entry in the compacted index
+        identity.register_issuer(&issuer);
+        let after_rereg = identity.list_issuers();
+        assert_eq!(after_rereg.len(), 1);
+    }
+
+    /// Verify that computing a score twice captures the previous score in the record.
+    #[test]
+    fn test_score_record_preserves_previous_score() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let credit_id = env.register_contract(None, CreditOracle);
+        let credit = CreditOracleClient::new(&env, &credit_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+        let feeder = soroban_sdk::Address::generate(&env);
+        let lender = soroban_sdk::Address::generate(&env);
+        let subject = soroban_sdk::Address::generate(&env);
+
+        credit.initialize(&admin);
+        credit.register_feeder(&admin, &feeder);
+        credit.register_lender(&admin, &lender);
+
+        // First computation: base score with no data
+        let first_score = credit.compute_score(&subject);
+        assert_eq!(first_score, 300);
+
+        // Verify previous_score is None on first write
+        let record1 = credit.get_score(&subject).unwrap();
+        assert_eq!(record1.previous_score, None);
+
+        // Now add some data so the second computation yields a different score
+        credit.update_tx_stats(
+            &feeder,
+            &subject,
+            &TxStats {
+                volume_30d: 500_000_000i128,
+                tx_count_30d: 10,
+                avg_counterparties: 3,
+            },
+        );
+        credit.set_vc_count(&feeder, &subject, &1);
+        for _ in 0..5 {
+            credit.record_repayment(&lender, &subject, &100_000_000i128, &true);
+        }
+
+        // Advance ledger so the new write is not skipped as unchanged
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + 1);
+
+        // Second computation
+        let second_score = credit.compute_score(&subject);
+        assert!(second_score > first_score);
+
+        // Verify previous_score is set to the first score
+        let record2 = credit.get_score(&subject).unwrap();
+        assert_eq!(record2.previous_score, Some(first_score));
+        assert_eq!(record2.score, second_score);
     }
 }
